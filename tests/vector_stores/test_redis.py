@@ -133,7 +133,7 @@ def test_create_col_keeps_distinct_dims_across_instances():
 
     captured = []
 
-    def capture_schema(schema):
+    def capture_schema(schema, **kwargs):
         captured.append(schema)
         return MagicMock()
 
@@ -157,7 +157,7 @@ def test_init_keeps_distinct_dims_from_module_global():
 
     captured = []
 
-    def capture_schema(schema):
+    def capture_schema(schema, **kwargs):
         captured.append(schema)
         return MagicMock()
 
