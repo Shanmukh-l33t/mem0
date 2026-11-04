@@ -298,9 +298,14 @@ def _safe_deepcopy_config(config):
             return type("Config", (), clone_dict)()
 
 
-def _normalize_iso_timestamp_to_utc(timestamp: Optional[str]) -> Optional[str]:
-    """Normalize timezone-aware ISO timestamps to UTC without rewriting naive values."""
-    if not timestamp:
+def _normalize_iso_timestamp_to_utc(timestamp: Optional[Any]) -> Optional[Any]:
+    """Normalize timezone-aware ISO timestamps to UTC without rewriting naive values.
+
+    Non-string values are returned unchanged: records written before add()
+    validated ``metadata["created_at"]`` can still hold one, and delete/delete_all
+    must be able to remove such records instead of raising ``TypeError`` (issue #7810).
+    """
+    if not timestamp or not isinstance(timestamp, str):
         return timestamp
     try:
         parsed = datetime.fromisoformat(timestamp)
@@ -309,6 +314,34 @@ def _normalize_iso_timestamp_to_utc(timestamp: Optional[str]) -> Optional[str]:
     if parsed.tzinfo is None:
         return timestamp
     return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _normalize_metadata_created_at(value: Any) -> Any:
+    """Normalize a caller-supplied ``metadata["created_at"]`` to an ISO 8601 string.
+
+    Strings are kept verbatim, and ``None`` keeps its "no timestamp" meaning.
+    ``datetime`` instances and numeric (non-bool) epoch timestamps are converted
+    to ISO 8601 strings. Any other type is rejected up front: ``MemoryItem.created_at``
+    is ``Optional[str]``, so storing a non-string poisons the record — later
+    ``get``/``get_all``/``search`` fail pydantic validation and ``delete``/``delete_all``
+    raise ``TypeError`` (issue #7810).
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            pass  # Not a representable timestamp — reject below like any other bad type.
+    raise Mem0ValidationError(
+        message='metadata["created_at"] must be a string, a datetime, or an epoch timestamp (int/float).',
+        error_code="VALIDATION_004",
+        details={"field": 'metadata["created_at"]', "provided_type": type(value).__name__},
+        suggestion="Convert the value to an ISO 8601 string (or pass a datetime or epoch seconds); "
+        "storing a non-string breaks later reads and deletes for this memory.",
+    )
 
 
 def _build_filters_and_metadata(
@@ -363,6 +396,9 @@ def _build_filters_and_metadata(
     base_metadata_template = (
         _strip_identity_keys(deepcopy(input_metadata), {}, context="add()") if input_metadata else {}
     )
+    if "created_at" in base_metadata_template:
+        # Reject or normalize non-string created_at before it reaches the store (issue #7810).
+        base_metadata_template["created_at"] = _normalize_metadata_created_at(base_metadata_template["created_at"])
     effective_query_filters = deepcopy(input_filters) if input_filters else {}
 
     # ---------- validate and add all provided session ids ----------
@@ -808,7 +844,7 @@ class Memory(MemoryBase):
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "event": "ADD"}]}`
 
         Raises:
-            Mem0ValidationError: If input validation fails (invalid memory_type, messages format, etc.).
+            Mem0ValidationError: If input validation fails (invalid memory_type, messages format, non-string metadata["created_at"], etc.).
             VectorStoreError: If vector store operations fail.
             EmbeddingError: If embedding generation fails.
             LLMError: If LLM operations fail.

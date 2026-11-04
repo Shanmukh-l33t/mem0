@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from mem0.exceptions import LLMError, VectorStoreError
-from mem0.memory.main import AsyncMemory, Memory
+from mem0.exceptions import LLMError, ValidationError, VectorStoreError
+from mem0.memory.main import AsyncMemory, Memory, _normalize_iso_timestamp_to_utc
 
 
 def _setup_mocks(mocker):
@@ -417,6 +417,116 @@ async def test_async_update_memory_uses_utc_timestamps(mocker):
     payload = memory.vector_store.update.call_args.kwargs["payload"]
     assert payload["created_at"] == "2026-03-17T17:00:00-07:00"
     assert payload["updated_at"] is not None
+
+
+# --- Regression (issue #7810): a non-string metadata["created_at"] must never reach the
+# --- store. One such record made every later get/get_all/search for the scope fail pydantic
+# --- validation (MemoryItem.created_at is Optional[str]) and made delete/delete_all raise
+# --- TypeError in _normalize_iso_timestamp_to_utc.
+
+
+def test_add_rejects_non_string_created_at_in_metadata(mocker):
+    memory = _build_memory_instance(mocker, Memory)
+
+    with pytest.raises(ValidationError) as exc_info:
+        memory.add(
+            "alice imported note",
+            user_id="alice",
+            infer=False,
+            metadata={"created_at": {"imported": 1735689600}},
+        )
+
+    assert "created_at" in str(exc_info.value)
+    assert memory.vector_store.insert.call_count == 0, "rejected metadata must not be stored"
+
+
+def test_add_rejects_bool_created_at_in_metadata(mocker):
+    """bool is an int subclass but meaningless as a timestamp — reject, do not coerce."""
+    memory = _build_memory_instance(mocker, Memory)
+
+    with pytest.raises(ValidationError):
+        memory.add("alice imported note", user_id="alice", infer=False, metadata={"created_at": True})
+
+
+def test_add_normalizes_epoch_created_at_in_metadata(mocker):
+    """Epoch-seconds created_at (common in imports) is stored as an ISO 8601 UTC string."""
+    memory = _build_memory_instance(mocker, Memory)
+
+    memory.add("alice imported note", user_id="alice", infer=False, metadata={"created_at": 1735689600})
+
+    payload = memory.vector_store.insert.call_args.kwargs["payloads"][0]
+    assert payload["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert payload["updated_at"] == payload["created_at"]
+
+
+def test_add_normalizes_datetime_created_at_in_metadata(mocker):
+    memory = _build_memory_instance(mocker, Memory)
+
+    memory.add(
+        "alice imported note",
+        user_id="alice",
+        infer=False,
+        metadata={"created_at": datetime(2025, 1, 1, tzinfo=timezone.utc)},
+    )
+
+    payload = memory.vector_store.insert.call_args.kwargs["payloads"][0]
+    assert payload["created_at"] == "2025-01-01T00:00:00+00:00"
+
+
+def test_add_keeps_string_created_at_in_metadata_verbatim(mocker):
+    memory = _build_memory_instance(mocker, Memory)
+    custom_ts = "2023-05-06T09:19:20+00:00"
+
+    memory.add("alice imported note", user_id="alice", infer=False, metadata={"created_at": custom_ts})
+
+    payload = memory.vector_store.insert.call_args.kwargs["payloads"][0]
+    assert payload["created_at"] == custom_ts
+    assert payload["updated_at"] == custom_ts
+
+
+@pytest.mark.asyncio
+async def test_async_add_rejects_non_string_created_at_in_metadata(mocker):
+    memory = _build_memory_instance(mocker, AsyncMemory)
+
+    with pytest.raises(ValidationError):
+        await memory.add(
+            "alice imported note",
+            user_id="alice",
+            infer=False,
+            metadata={"created_at": ["2025-01-01"]},
+        )
+
+    assert memory.vector_store.insert.call_count == 0, "rejected metadata must not be stored"
+
+
+@pytest.mark.asyncio
+async def test_async_add_normalizes_epoch_created_at_in_metadata(mocker):
+    memory = _build_memory_instance(mocker, AsyncMemory)
+
+    await memory.add("alice imported note", user_id="alice", infer=False, metadata={"created_at": 1735689600})
+
+    payload = memory.vector_store.insert.call_args.kwargs["payloads"][0]
+    assert payload["created_at"] == "2025-01-01T00:00:00+00:00"
+    assert payload["updated_at"] == payload["created_at"]
+
+
+def test_normalize_iso_timestamp_to_utc_returns_non_strings_unchanged(mocker):
+    """Legacy records already stored with a non-string created_at must stay deletable.
+
+    Before the fix datetime.fromisoformat raised TypeError on them, so
+    delete/delete_all could not remove the poisoned record.
+    """
+    assert _normalize_iso_timestamp_to_utc(1735689600) == 1735689600
+    assert _normalize_iso_timestamp_to_utc({"imported": True}) == {"imported": True}
+
+
+def test_delete_memory_tolerates_legacy_non_string_created_at(mocker):
+    memory = _build_memory_instance(mocker, Memory)
+    existing = MagicMock(payload={"data": "alice imported note", "created_at": 1735689600})
+
+    memory._delete_memory("memory-id", existing_memory=existing)
+
+    memory.vector_store.delete.assert_called_once_with(vector_id="memory-id")
 
 
 _ATTACKER_UPDATE_METADATA = {
