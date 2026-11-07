@@ -481,6 +481,11 @@ program
 		(v) => Number.parseInt(v),
 		100,
 	)
+	.option(
+		"--all",
+		"Fetch every page, starting at page 1. Cannot be combined with --page.",
+		false,
+	)
 	.option("--category <name>", "Filter by category.")
 	.option("--after <date>", "Created after (YYYY-MM-DD).")
 	.option("--before <date>", "Created before (YYYY-MM-DD).")
@@ -497,7 +502,20 @@ program
 		"after",
 		"\nExamples:\n  $ mem0 list -u alice\n  $ mem0 list --category prefs --after 2024-01-01 -o json",
 	)
-	.action(async (opts) => {
+	.action(async (opts, cmd) => {
+		// Reject an explicitly passed --page together with --all, even when the
+		// value would not change the outcome (--page 1), so the flags never look
+		// combinable. Commander reports where the value came from: "default" is
+		// the implicit page 1, anything else (cli/env) was set deliberately —
+		// the same DEFAULT vs COMMANDLINE distinction the Python CLI checks.
+		const pageSource =
+			typeof cmd?.getOptionValueSource === "function"
+				? cmd.getOptionValueSource("page")
+				: "default";
+		if (opts.all && pageSource !== undefined && pageSource !== "default") {
+			printError("--all cannot be combined with --page.");
+			process.exit(1);
+		}
 		const { cmdList } = await import("./commands/memory.js");
 		const isAgent = checkAgentMode();
 		const { backend, config } = await getBackendAndConfig(
@@ -510,6 +528,7 @@ program
 			...ids,
 			page: opts.page,
 			pageSize: opts.pageSize,
+			allPages: opts.all,
 			category: opts.category,
 			after: opts.after,
 			before: opts.before,

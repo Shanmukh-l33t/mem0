@@ -386,6 +386,7 @@ export async function cmdList(
 		runId?: string;
 		page: number;
 		pageSize: number;
+		allPages?: boolean;
 		category?: string;
 		after?: string;
 		before?: string;
@@ -403,11 +404,39 @@ export async function cmdList(
 		printError("--page must be >= 1.");
 		process.exit(1);
 	}
+	if (opts.allPages && opts.page !== 1) {
+		printError("--all cannot be combined with --page.");
+		process.exit(1);
+	}
 
 	const start = performance.now();
 	let results: Record<string, unknown>[];
 	try {
 		results = await timedStatus("Listing memories...", async () => {
+			if (opts.allPages) {
+				// Walk pages from 1 until a short or empty page comes back.
+				const collected: Record<string, unknown>[] = [];
+				let currentPage = 1;
+				for (;;) {
+					const batch = await backend.listMemories({
+						userId: opts.userId,
+						agentId: opts.agentId,
+						appId: opts.appId,
+						runId: opts.runId,
+						page: currentPage,
+						pageSize: opts.pageSize,
+						category: opts.category,
+						after: opts.after,
+						before: opts.before,
+						showExpired: opts.showExpired,
+						latestOnly: opts.latestOnly,
+					});
+					collected.push(...batch);
+					if (batch.length < opts.pageSize) break;
+					currentPage += 1;
+				}
+				return collected;
+			}
 			return backend.listMemories({
 				userId: opts.userId,
 				agentId: opts.agentId,
@@ -427,6 +456,8 @@ export async function cmdList(
 		process.exit(1);
 	}
 	const elapsed = (performance.now() - start) / 1000;
+	// With --all the printed set spans every page, so no single page number applies.
+	const summaryPage = opts.allPages ? undefined : opts.page;
 
 	if (opts.output === "quiet") return;
 
@@ -450,7 +481,7 @@ export async function cmdList(
 			printResultSummary({
 				count: results.length,
 				durationSecs: elapsed,
-				page: opts.page,
+				page: summaryPage,
 				scopeIds: { user_id: opts.userId, agent_id: opts.agentId },
 			});
 		} else {
@@ -464,7 +495,7 @@ export async function cmdList(
 			printResultSummary({
 				count: results.length,
 				durationSecs: elapsed,
-				page: opts.page,
+				page: summaryPage,
 				scopeIds: { user_id: opts.userId, agent_id: opts.agentId },
 			});
 		} else {

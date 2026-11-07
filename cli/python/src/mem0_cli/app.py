@@ -486,6 +486,7 @@ def get(
 
 @app.command(name="list", rich_help_panel="Memory")
 def list_cmd(
+    ctx: typer.Context,
     user_id: str | None = typer.Option(
         None, "--user-id", "-u", help="Filter by user.", rich_help_panel="Scope"
     ),
@@ -501,6 +502,12 @@ def list_cmd(
     page: int = typer.Option(1, "--page", help="Page number.", rich_help_panel="Pagination"),
     page_size: int = typer.Option(
         100, "--page-size", help="Results per page.", rich_help_panel="Pagination"
+    ),
+    all_pages: bool = typer.Option(
+        False,
+        "--all",
+        help="Fetch every page, starting at page 1. Cannot be combined with --page.",
+        rich_help_panel="Pagination",
     ),
     category: str | None = typer.Option(
         None, "--category", help="Filter by category.", rich_help_panel="Filters"
@@ -542,6 +549,17 @@ def list_cmd(
     """
     from mem0_cli.commands.memory import cmd_list
 
+    # Reject an explicitly passed --page together with --all, even when the value
+    # would not change the outcome (--page 1), so the flags never look combinable.
+    # Compare by member name rather than importing click.core.ParameterSource:
+    # typer >= 0.28 vendors click as typer._click, so `click` is not importable
+    # there, and in mixed installs an identity check against the wrong enum would
+    # reject a plain `--all`. DEFAULT vs COMMANDLINE is stable across both.
+    page_source = ctx.get_parameter_source("page")
+    if all_pages and page_source is not None and page_source.name != "DEFAULT":
+        print_error(err_console, "--all cannot be combined with --page.")
+        raise typer.Exit(1)
+
     backend, config = _get_backend_and_config(api_key, base_url)
     ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
 
@@ -550,6 +568,7 @@ def list_cmd(
         **ids,
         page=page,
         page_size=page_size,
+        all_pages=all_pages,
         category=category,
         after=after,
         before=before,
@@ -1210,6 +1229,7 @@ def _build_help_json() -> dict:
                 "--agent-id": "Filter by agent.",
                 "--page": "Page number (default: 1).",
                 "--page-size": "Results per page (default: 100).",
+                "--all": "Fetch every page; cannot be combined with --page.",
                 "--category": "Filter by category.",
                 "--after": "Created after (YYYY-MM-DD).",
                 "--before": "Created before (YYYY-MM-DD).",

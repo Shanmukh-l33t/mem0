@@ -704,6 +704,68 @@ class TestListCommand:
         assert call_kwargs["show_expired"] is True
         assert call_kwargs["latest_only"] is True
 
+    def test_list_all_pages_walks_until_short_page(self, mock_backend):
+        """--all walks pages from 1 until a short page and prints one combined result."""
+        full_page = [{"id": "a", "memory": "one"}, {"id": "b", "memory": "two"}]
+        short_page = [{"id": "c", "memory": "three"}]
+
+        def fake_list(**kwargs):
+            return full_page if kwargs["page"] == 1 else short_page
+
+        mock_backend.list_memories.side_effect = fake_list
+        console, buf = _make_console()
+        err_console, _err_buf = _make_err_console()
+        with (
+            patch("mem0_cli.commands.memory.console", console),
+            patch("mem0_cli.commands.memory.err_console", err_console),
+        ):
+            cmd_list(
+                mock_backend,
+                user_id="alice",
+                agent_id=None,
+                app_id=None,
+                run_id=None,
+                page=1,
+                page_size=2,
+                category=None,
+                after=None,
+                before=None,
+                all_pages=True,
+                output="json",
+            )
+        pages_called = [c.kwargs["page"] for c in mock_backend.list_memories.call_args_list]
+        assert pages_called == [1, 2]
+        output = buf.getvalue()
+        assert '"count": 3' in output
+        for memory_text in ("one", "two", "three"):
+            assert memory_text in output
+
+    def test_list_all_rejects_page(self, mock_backend):
+        """--all combined with a non-default --page fails before any backend call."""
+        console, _buf = _make_console()
+        err_console, err_buf = _make_err_console()
+        with (
+            patch("mem0_cli.commands.memory.console", console),
+            patch("mem0_cli.commands.memory.err_console", err_console),
+            pytest.raises(TyperExit),
+        ):
+            cmd_list(
+                mock_backend,
+                user_id="alice",
+                agent_id=None,
+                app_id=None,
+                run_id=None,
+                page=3,
+                page_size=100,
+                category=None,
+                after=None,
+                before=None,
+                all_pages=True,
+                output="table",
+            )
+        assert "--all cannot be combined with --page." in err_buf.getvalue()
+        mock_backend.list_memories.assert_not_called()
+
 
 class TestUpdateCommand:
     def test_update(self, mock_backend):

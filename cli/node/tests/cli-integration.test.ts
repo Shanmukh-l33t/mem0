@@ -169,4 +169,37 @@ describe("CLI Integration — isolated (clean home)", () => {
     expect(result.exitCode).toBe(0);
     fs.rmSync(home, { recursive: true, force: true });
   });
+
+  it("list help advertises --all", () => {
+    const result = run(["list", "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("--all");
+  });
+
+  it("list --all combined with an explicit --page fails with a clear message", () => {
+    const home = cleanHome();
+    const result = run(["list", "--all", "--page", "2"], { home });
+    expect(result.exitCode).not.toBe(0);
+    const combined = result.stdout + result.stderr;
+    expect(combined).toContain("--all cannot be combined with --page.");
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("list --all with --page 1 still fails: the flags are not combinable", () => {
+    const home = cleanHome();
+    const result = run(["list", "--all", "--page", "1"], { home });
+    expect(result.exitCode).not.toBe(0);
+    const combined = result.stdout + result.stderr;
+    expect(combined).toContain("--all cannot be combined with --page.");
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("list --all alone is not a flag conflict", () => {
+    const home = cleanHome();
+    const result = run(["list", "--all"], { home });
+    const combined = result.stdout + result.stderr;
+    expect(combined).not.toContain("--all cannot be combined with --page.");
+    expect(result.exitCode).not.toBe(0); // fails later, on the missing API key
+    fs.rmSync(home, { recursive: true, force: true });
+  });
 });

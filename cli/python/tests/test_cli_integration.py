@@ -206,6 +206,27 @@ class TestCLIIsolated:
         combined = result.stderr + result.stdout
         assert "API key" in combined or "Error" in combined
 
+    def test_list_all_with_page_errors(self, clean_home):
+        """--all combined with an explicit --page fails with a clear message."""
+        result = _run(["list", "--all", "--page", "2"], home_dir=clean_home)
+        assert result.returncode != 0
+        combined = result.stderr + result.stdout
+        assert "--all cannot be combined with --page." in combined
+
+    def test_list_all_with_page_one_errors(self, clean_home):
+        """Even --page 1 is rejected together with --all: the flags are not combinable."""
+        result = _run(["list", "--all", "--page", "1"], home_dir=clean_home)
+        assert result.returncode != 0
+        combined = result.stderr + result.stdout
+        assert "--all cannot be combined with --page." in combined
+
+    def test_list_all_alone_is_not_a_flag_conflict(self, clean_home):
+        """--all by itself is a valid flag: it must reach the normal list flow."""
+        result = _run(["list", "--all"], home_dir=clean_home)
+        combined = result.stderr + result.stdout
+        assert "--all cannot be combined with --page." not in combined
+        assert result.returncode != 0  # fails later, on the missing API key
+
     def test_delete_no_id_no_all_errors(self, clean_home):
         """Delete without memory_id, --all, or --entity must fail."""
         result = _run(

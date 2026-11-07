@@ -387,6 +387,7 @@ def cmd_list(
     before: str | None,
     show_expired: bool = False,
     latest_only: bool = False,
+    all_pages: bool = False,
     output: str = "table",
 ) -> None:
     """List memories."""
@@ -401,23 +402,49 @@ def cmd_list(
     if page < 1:
         print_error(err_console, "--page must be >= 1.")
         raise typer.Exit(1)
+    if all_pages and page != 1:
+        print_error(err_console, "--all cannot be combined with --page.")
+        raise typer.Exit(1)
 
     _start = _time.perf_counter()
     with timed_status(err_console, "Listing memories...") as _ts:
         try:
-            results = backend.list_memories(
-                user_id=user_id,
-                agent_id=agent_id,
-                app_id=app_id,
-                run_id=run_id,
-                page=page,
-                page_size=page_size,
-                category=category,
-                after=after,
-                before=before,
-                show_expired=show_expired,
-                latest_only=latest_only,
-            )
+            if all_pages:
+                # Walk pages from 1 until a short or empty page comes back.
+                results: list[dict] = []
+                current_page = 1
+                while True:
+                    batch = backend.list_memories(
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        app_id=app_id,
+                        run_id=run_id,
+                        page=current_page,
+                        page_size=page_size,
+                        category=category,
+                        after=after,
+                        before=before,
+                        show_expired=show_expired,
+                        latest_only=latest_only,
+                    )
+                    results.extend(batch)
+                    if len(batch) < page_size:
+                        break
+                    current_page += 1
+            else:
+                results = backend.list_memories(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    app_id=app_id,
+                    run_id=run_id,
+                    page=page,
+                    page_size=page_size,
+                    category=category,
+                    after=after,
+                    before=before,
+                    show_expired=show_expired,
+                    latest_only=latest_only,
+                )
         except Exception as e:
             print_error(err_console, str(e))
             raise typer.Exit(1) from None
@@ -425,6 +452,9 @@ def cmd_list(
 
     if output == "quiet":
         return
+
+    # With --all the printed set spans every page, so no single page number applies.
+    summary_page: int | None = None if all_pages else page
 
     if output in ("json", "agent"):
         scope = {
@@ -452,7 +482,7 @@ def cmd_list(
                 console,
                 len(results),
                 duration_secs=_elapsed,
-                page=page,
+                page=summary_page,
                 user_id=user_id,
                 agent_id=agent_id,
             )
@@ -467,7 +497,7 @@ def cmd_list(
                 console,
                 len(results),
                 duration_secs=_elapsed,
-                page=page,
+                page=summary_page,
                 user_id=user_id,
                 agent_id=agent_id,
             )

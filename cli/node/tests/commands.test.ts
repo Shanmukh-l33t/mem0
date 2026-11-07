@@ -414,6 +414,70 @@ describe("cmdList", () => {
 			expect.objectContaining({ showExpired: true, latestOnly: true }),
 		);
 	});
+
+	it("--all walks pages from 1 until a short page and prints one combined result", async () => {
+		const fullPage = [
+			{ id: "a", memory: "one" },
+			{ id: "b", memory: "two" },
+		];
+		const shortPage = [{ id: "c", memory: "three" }];
+		(mockBackend.listMemories as ReturnType<typeof vi.fn>).mockImplementation(
+			(opts: { page?: number }) =>
+				Promise.resolve(opts.page === 1 ? fullPage : shortPage),
+		);
+		const { cmdList } = await import("../src/commands/memory.js");
+		await cmdList(mockBackend, {
+			userId: "alice",
+			page: 1,
+			pageSize: 2,
+			allPages: true,
+			output: "json",
+		});
+		const pagesCalled = (
+			mockBackend.listMemories as ReturnType<typeof vi.fn>
+		).mock.calls.map((c) => (c as [{ page?: number }])[0].page);
+		expect(pagesCalled).toEqual([1, 2]);
+		expect(output).toContain('"count": 3');
+		for (const memoryText of ["one", "two", "three"]) {
+			expect(output).toContain(memoryText);
+		}
+		// The combined set spans every page, so no page number is reported.
+		expect(output).not.toContain("page 1");
+	});
+
+	it("--all rejects a non-default --page before any backend call", async () => {
+		const { cmdList } = await import("../src/commands/memory.js");
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+			throw new Error(`process.exit:${code}`);
+		}) as never);
+
+		await expect(
+			cmdList(mockBackend, {
+				userId: "alice",
+				page: 3,
+				pageSize: 100,
+				allPages: true,
+				output: "table",
+			}),
+		).rejects.toThrow("process.exit:1");
+
+		expect(errOutput).toContain("--all cannot be combined with --page.");
+		expect(mockBackend.listMemories).not.toHaveBeenCalled();
+		exitSpy.mockRestore();
+	});
+
+	it("--all with the default page does not trigger the conflict check", async () => {
+		const { cmdList } = await import("../src/commands/memory.js");
+		await cmdList(mockBackend, {
+			userId: "alice",
+			page: 1,
+			pageSize: 100,
+			allPages: true,
+			output: "text",
+		});
+		expect(errOutput).not.toContain("--all cannot be combined with --page.");
+		expect(mockBackend.listMemories).toHaveBeenCalled();
+	});
 });
 
 describe("cmdUpdate", () => {
