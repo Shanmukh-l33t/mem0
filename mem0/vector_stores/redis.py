@@ -290,7 +290,10 @@ class RedisDB(VectorStoreBase):
 
     def get(self, vector_id):
         result = self.index.fetch(vector_id)
-        if result is None:
+        # Older redisvl releases return {} (not None) from fetch() when the id is
+        # missing on HASH indexes, so `is None` never fired against a real Redis
+        # and the lookups below raised KeyError("hash"). Truthiness covers both.
+        if not result:
             return None
         payload = {
             "hash": result["hash"],

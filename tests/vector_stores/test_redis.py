@@ -187,6 +187,42 @@ def test_get_returns_none_for_missing_id():
     mock_index.fetch.assert_called_once_with("missing_id")
 
 
+def test_get_returns_none_when_fetch_returns_empty_dict():
+    """get() must return None when redisvl returns {} (not None) for a missing id.
+
+    On HASH indexes every redisvl release up to and including 0.32.0 returns an
+    empty dict from ``SearchIndex.fetch()`` when the id does not exist. The
+    previous ``if result is None`` guard therefore never fired against a real
+    Redis — it was only ever exercised with a mocked ``fetch()`` — and the
+    payload assembly below raised ``KeyError: 'hash'``. Memory treats a missing
+    record as ``None``, so an empty result has to behave like a miss on both
+    old and new redisvl.
+    """
+    db, mock_index = _make_redis_db()
+    mock_index.fetch.return_value = {}
+
+    assert db.get("missing_id") is None
+    mock_index.fetch.assert_called_once_with("missing_id")
+
+
+def test_get_returns_none_when_fetch_returns_empty_dict():
+    """get() must return None when redisvl returns {} (not None) for a missing id.
+
+    On HASH indexes every redisvl release up to and including 0.32.0 returns an
+    empty dict from ``SearchIndex.fetch()`` when the id does not exist. The
+    previous ``if result is None`` guard therefore never fired against a real
+    Redis — it was only ever exercised with a mocked ``fetch()`` — and the
+    payload assembly below raised ``KeyError: 'hash'``. Memory treats a missing
+    record as ``None``, so an empty result has to behave like a miss on both
+    old and new redisvl.
+    """
+    db, mock_index = _make_redis_db()
+    mock_index.fetch.return_value = {}
+
+    assert db.get("missing_id") is None
+    mock_index.fetch.assert_called_once_with("missing_id")
+
+
 def test_insert_entity_payload_without_hash_and_created_at():
     """insert() must not crash on entity payloads that lack hash/created_at."""
     db, mock_index = _make_redis_db()
