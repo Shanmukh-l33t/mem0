@@ -10,7 +10,7 @@ import uuid
 import warnings
 from copy import deepcopy
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from pydantic import ValidationError
 
@@ -80,6 +80,30 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*swigva
 
 # Initialize logger early for util functions
 logger = logging.getLogger(__name__)
+
+# Why a fact extracted by add() was not stored (issue #7865). Reported under
+# the optional "skipped" key of the add() response — only present when non-empty.
+SkippedReason = Literal["duplicate", "embed_failed", "insert_failed", "extraction_parse_failed"]
+
+
+class SkippedMemory(TypedDict):
+    """One fact extracted by ``add()`` that was not stored, and why.
+
+    Keys:
+        memory: The fact text (None when extraction failed before any fact existed).
+        reason: ``SkippedReason`` — "duplicate" (md5 hash matched an existing or
+            in-batch fact), "embed_failed", "insert_failed", or
+            "extraction_parse_failed".
+        existing_id: For "duplicate": id of the stored memory whose hash matched,
+            else None (in-batch duplicates and non-duplicate reasons).
+        error: Error message for "embed_failed"/"insert_failed"/
+            "extraction_parse_failed", else None.
+    """
+
+    memory: Optional[str]
+    reason: SkippedReason
+    existing_id: Optional[str]
+    error: Optional[str]
 
 
 def _vector_store_list_rows(listed):
@@ -806,6 +830,11 @@ class Memory(MemoryBase):
             dict: A dictionary containing the result of the memory addition operation, typically
                   including a list of memory items affected (added, updated) under a "results" key.
                   Example for v1.1+: `{"results": [{"id": "...", "memory": "...", "event": "ADD"}]}`
+                  When extracted facts were not stored, a "skipped" key is added (only when
+                  non-empty) listing each dropped fact with the reason it was not stored:
+                  `{"results": [...], "skipped": [{"memory": "...", "reason": "duplicate",
+                  "existing_id": "...", "error": None}]}` — see `SkippedMemory` for the
+                  per-reason key semantics.
 
         Raises:
             Mem0ValidationError: If input validation fails (invalid memory_type, messages format, etc.).
@@ -868,7 +897,10 @@ class Memory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        skipped: List[SkippedMemory] = []
+        vector_store_result = self._add_to_vector_store(
+            messages, processed_metadata, effective_filters, infer, prompt=prompt, skipped=skipped
+        )
         scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
@@ -876,9 +908,21 @@ class Memory(MemoryBase):
             display_scale_threshold_notice(self, "sync", "add", *scale_threshold_notice)
         else:
             display_first_run_notice(self, "sync", "add")
-        return {"results": vector_store_result}
+        result = {"results": vector_store_result}
+        if skipped:
+            result["skipped"] = skipped
+        return result
 
-    def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
+    def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None, skipped=None):
+        """Store extracted facts; report dropped facts into ``skipped`` if given.
+
+        Args:
+            skipped: Optional collector list. Every extracted fact that is not
+                stored gets one ``SkippedMemory`` entry appended here. When None
+                (legacy callers) drops are only logged, exactly as before.
+        """
+        if skipped is None:
+            skipped = []
         if not infer:
             returned_memories = []
             for message_dict in messages:
@@ -984,6 +1028,7 @@ class Memory(MemoryBase):
         except Exception as e:
             logger.error(f"Error parsing extraction response: {e}")
             extracted_memories = []
+            skipped.append({"memory": None, "reason": "extraction_parse_failed", "existing_id": None, "error": str(e)})
 
         if not extracted_memories:
             # Save messages even if nothing extracted
@@ -992,6 +1037,7 @@ class Memory(MemoryBase):
 
         # Phase 3: Batch embed all extracted memory texts
         mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
+        embed_errors = {}
         try:
             mem_embeddings_list = self.embedding_model.embed_batch(mem_texts, "add")
             embed_map = dict(zip(mem_texts, mem_embeddings_list))
@@ -1003,25 +1049,45 @@ class Memory(MemoryBase):
                     embed_map[text] = self.embedding_model.embed(text, "add")
                 except Exception as e:
                     logger.warning(f"Failed to embed memory text: {e}")
+                    embed_errors[text] = str(e)
 
         # Phase 4: Per-memory CPU processing + Phase 5: Hash dedup
-        # Build set of existing hashes for dedup
-        existing_hashes = set()
+        # Map existing hashes to the stored memory id so a dropped duplicate
+        # can be reported with the memory it duplicated (issue #7865).
+        existing_hash_ids = {}
         for mem in existing_results:
             h = mem.payload.get("hash") if hasattr(mem, "payload") and mem.payload else None
             if h:
-                existing_hashes.add(h)
+                existing_hash_ids[h] = mem.id
 
         records = []  # (memory_id, text, embedding, payload)
         seen_hashes = set()  # dedup within the current batch
         for mem in extracted_memories:
             text = mem.get("text")
-            if not text or text not in embed_map:
+            if not text:
+                continue
+            if text not in embed_map:
+                skipped.append(
+                    {
+                        "memory": text,
+                        "reason": "embed_failed",
+                        "existing_id": None,
+                        "error": embed_errors.get(text),
+                    }
+                )
                 continue
 
             mem_hash = hashlib.md5(text.encode()).hexdigest()
-            if mem_hash in existing_hashes or mem_hash in seen_hashes:
+            if mem_hash in existing_hash_ids or mem_hash in seen_hashes:
                 logger.debug(f"Skipping duplicate memory (hash match): {text[:50]}")
+                skipped.append(
+                    {
+                        "memory": text,
+                        "reason": "duplicate",
+                        "existing_id": existing_hash_ids.get(mem_hash),
+                        "error": None,
+                    }
+                )
                 continue
             seen_hashes.add(mem_hash)
 
@@ -1068,6 +1134,7 @@ class Memory(MemoryBase):
                     persisted_records.append(rec)
                 except Exception as e:
                     logger.error(f"Failed to insert memory {rec[0]}: {e}")
+                    skipped.append({"memory": rec[1], "reason": "insert_failed", "existing_id": None, "error": str(e)})
 
         if not persisted_records:
             self.db.save_messages(messages, session_scope)
@@ -2494,6 +2561,9 @@ class AsyncMemory(MemoryBase):
 
         Returns:
             dict: A dictionary containing the result of the memory addition operation.
+                  When extracted facts were not stored, a "skipped" key is added (only when
+                  non-empty) listing each dropped fact with the reason it was not stored —
+                  see `SkippedMemory` and the sync `Memory.add` docstring for the shape.
         """
         if timestamp is not None:
             raise ValueError(await get_temporal_feature_error_message_async("async", "add", "timestamp"))
@@ -2545,7 +2615,10 @@ class AsyncMemory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = await self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        skipped: List[SkippedMemory] = []
+        vector_store_result = await self._add_to_vector_store(
+            messages, processed_metadata, effective_filters, infer, prompt=prompt, skipped=skipped
+        )
         scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
@@ -2553,7 +2626,10 @@ class AsyncMemory(MemoryBase):
             await display_scale_threshold_notice_async(self, "async", "add", *scale_threshold_notice)
         else:
             await display_first_run_notice_async(self, "async", "add")
-        return {"results": vector_store_result}
+        result = {"results": vector_store_result}
+        if skipped:
+            result["skipped"] = skipped
+        return result
 
     async def _add_to_vector_store(
         self,
@@ -2562,7 +2638,17 @@ class AsyncMemory(MemoryBase):
         effective_filters: dict,
         infer: bool,
         prompt: Optional[str] = None,
+        skipped: Optional[List[SkippedMemory]] = None,
     ):
+        """Store extracted facts; report dropped facts into ``skipped`` if given.
+
+        Args:
+            skipped: Optional collector list. Every extracted fact that is not
+                stored gets one ``SkippedMemory`` entry appended here. When None
+                (legacy callers) drops are only logged, exactly as before.
+        """
+        if skipped is None:
+            skipped = []
         if not infer:
             returned_memories = []
             for message_dict in messages:
@@ -2668,6 +2754,7 @@ class AsyncMemory(MemoryBase):
         except Exception as e:
             logger.error(f"Error parsing extraction response (async): {e}")
             extracted_memories = []
+            skipped.append({"memory": None, "reason": "extraction_parse_failed", "existing_id": None, "error": str(e)})
 
         if not extracted_memories:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
@@ -2675,6 +2762,7 @@ class AsyncMemory(MemoryBase):
 
         # Phase 3: Batch embed all extracted memory texts
         mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
+        embed_errors = {}
         try:
             mem_embeddings_list = await asyncio.to_thread(self.embedding_model.embed_batch, mem_texts, "add")
             embed_map = dict(zip(mem_texts, mem_embeddings_list))
@@ -2685,24 +2773,45 @@ class AsyncMemory(MemoryBase):
                     embed_map[text] = await asyncio.to_thread(self.embedding_model.embed, text, "add")
                 except Exception as e:
                     logger.warning(f"Failed to embed memory text (async): {e}")
+                    embed_errors[text] = str(e)
 
         # Phase 4: Per-memory CPU processing + Phase 5: Hash dedup
-        existing_hashes = set()
+        # Map existing hashes to the stored memory id so a dropped duplicate
+        # can be reported with the memory it duplicated (issue #7865).
+        existing_hash_ids = {}
         for mem in existing_results:
             h = mem.payload.get("hash") if hasattr(mem, "payload") and mem.payload else None
             if h:
-                existing_hashes.add(h)
+                existing_hash_ids[h] = mem.id
 
         records = []
         seen_hashes = set()
         for mem in extracted_memories:
             text = mem.get("text")
-            if not text or text not in embed_map:
+            if not text:
+                continue
+            if text not in embed_map:
+                skipped.append(
+                    {
+                        "memory": text,
+                        "reason": "embed_failed",
+                        "existing_id": None,
+                        "error": embed_errors.get(text),
+                    }
+                )
                 continue
 
             mem_hash = hashlib.md5(text.encode()).hexdigest()
-            if mem_hash in existing_hashes or mem_hash in seen_hashes:
+            if mem_hash in existing_hash_ids or mem_hash in seen_hashes:
                 logger.debug(f"Skipping duplicate memory (hash match, async): {text[:50]}")
+                skipped.append(
+                    {
+                        "memory": text,
+                        "reason": "duplicate",
+                        "existing_id": existing_hash_ids.get(mem_hash),
+                        "error": None,
+                    }
+                )
                 continue
             seen_hashes.add(mem_hash)
 
@@ -2751,6 +2860,7 @@ class AsyncMemory(MemoryBase):
                     persisted_records.append(rec)
                 except Exception as e:
                     logger.error(f"Failed to insert memory {rec[0]} (async): {e}")
+                    skipped.append({"memory": rec[1], "reason": "insert_failed", "existing_id": None, "error": str(e)})
 
         if not persisted_records:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
