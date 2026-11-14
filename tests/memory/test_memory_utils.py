@@ -3,6 +3,7 @@ from unittest.mock import Mock
 import pytest
 
 from mem0.memory.utils import (
+    extract_json,
     parse_messages,
     parse_vision_messages,
     process_telemetry_filters,
@@ -205,3 +206,17 @@ class TestRemoveCodeBlocks:
 
     def test_unsupported_content_type_returns_empty_string(self):
         assert remove_code_blocks(42) == ""
+
+
+class TestExtractJson:
+    # Reproduces #7919: only the literal lowercase `json` tag was stripped, so any
+    # other tag (case variants, or a real language) leaked into the captured string
+    # and every json.loads(extract_json(...)) call site raised JSONDecodeError.
+    @pytest.mark.parametrize("tag", ["json", "JSON", "Json", "python", ""])
+    def test_strips_any_code_fence_language_tag(self, tag):
+        payload = '{"name": "Alice"}'
+        assert extract_json(f"```{tag}\n{payload}\n```") == payload
+
+    def test_unfenced_and_array_payloads_keep_working(self):
+        assert extract_json('{"name": "Alice"}') == '{"name": "Alice"}'
+        assert extract_json('```json\n[{"fact": "likes tea"}]\n```') == '[{"fact": "likes tea"}]'
